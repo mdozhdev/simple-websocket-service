@@ -1,0 +1,73 @@
+name: Build & Deploy to Cloud Run
+
+on:
+  push:
+    branches:
+      - dev
+      - staging
+      - main
+
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        required: true
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+
+env:
+  IMAGE_TAG: ${{ github.sha }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    # Resolve environment automatically OR from manual input
+    environment: >-
+      ${{
+        github.event_name == 'workflow_dispatch' && inputs.environment ||
+        github.ref_name == 'dev' && 'dev' ||
+        github.ref_name == 'staging' && 'staging' ||
+        'prod'
+      }}
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+
+      - name: Configure Docker auth
+        run: |
+          gcloud auth configure-docker \
+            ${{ vars.GCP_REGION }}-docker.pkg.dev
+
+      - name: Build and push image
+        run: |
+          IMAGE=${{ vars.GCP_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/${{ vars.GCP_GAR_REPOSITORY }}/${{ vars.IMAGE_NAME }}:${IMAGE_TAG}
+          docker build -t $IMAGE .
+          docker push $IMAGE
+
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy ${{ vars.GCP_CLOUD_RUN_SERVICE }} \
+            --image ${{ vars.GCP_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/${{ vars.GCP_GAR_REPOSITORY }}/${{ vars.IMAGE_NAME }}:${IMAGE_TAG} \
+            --region ${{ vars.GCP_REGION }} \
+            --platform managed \
+            --quiet
